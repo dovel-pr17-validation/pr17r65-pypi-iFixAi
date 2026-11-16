@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  # pull_request: only when the PR base is one of these (fork PRs included).
+  # All branches still get CI on push: — see CONTRIBUTING.md § Continuous integration.
+  pull_request:
+    branches: [main, "fix/**", "feat/**"]
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Validate layout and example fixtures
+        run: |
+          set -euo pipefail
+          ifixai validate
+          shopt -s nullglob
+          for f in ifixai/fixtures/examples/*.yaml; do
+            echo "Validating $f"
+            ifixai validate --full-run "$f"
+          done
+
+      - name: Tests
+        # The suite is the only check that exercises the inspections, the
+        # scoring engine, Policy Lab and trajectory assurance. `acceptance` is
+        # opt-in by design -- it needs optional heavy dependencies and asserts
+        # on wall-clock windows -- so it stays deselected here and is run by
+        # hand: `pytest ifixai -m acceptance` with `.[dev,bedrock]` installed,
+        # on a machine that is actually idle. A scheduled job to run it was
+        # tried and withheld: across seven local runs those tests passed only
+        # on an idle machine and failed in four, serial and parallel alike, so
+        # a nightly job would have gone red without indicating a regression.
+        run: pytest ifixai -m "not acceptance" -q -n auto --dist loadfile
+
+      - name: Lint
+        run: ruff check ifixai
+
+      - name: Security scan
+        run: bandit -r ifixai -ll
+
+      - name: Docs presence check
+        run: |
+          test -f CONTRIBUTING.md || { echo "CONTRIBUTING.md missing"; exit 1; }
+          test -f SECURITY.md || { echo "SECURITY.md missing"; exit 1; }
+          test -f docs/inspections.md || { echo "docs/inspections.md missing"; exit 1; }
+          echo "governance docs present"
+          broken=0
+          while IFS= read -r target; do
+            test -e "docs/$target" || { echo "docs/README.md links to missing docs/$target"; broken=1; }
+          done < <(grep -oE '[]][(][^)#]+' docs/README.md | sed 's/^](//' | grep -vE '^[a-z]+:')
+          test "$broken" -eq 0 || exit 1
+          echo "docs index links resolve"
+
